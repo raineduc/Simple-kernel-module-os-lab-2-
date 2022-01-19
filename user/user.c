@@ -1,45 +1,25 @@
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
 
-struct msg_to_kernel {
-	int pid;
-	int pci_vendor_id;
-	int pci_device_id;
-};
 
-struct msg_page {
-  unsigned long flags;
-  int refcount;
-};
-
-struct msg_pci_dev {
-  unsigned short vendor;
-  unsigned short device;
-  unsigned char pin;
-  unsigned char revision;
-  unsigned int fn;
-};
-
-struct msg_to_user {
-  struct msg_page page;
-  struct msg_pci_dev pci_dev;
-};
+#define BUFFER_SIZE 512
 
 int main(int argc, char *argv[]) {
-  struct msg_to_kernel msg_to_kernel;
-  struct msg_to_user *msg_to_user;
-  
-  if (argc < 4) {
-    fprintf(stderr, "Not enough arguments, expected 4\n");
-    exit(1);
-  }
+  bool has_pid = false;
+  bool has_vid = false;
+  bool has_devid = false;
+  int pid;
+  unsigned int vendor_id;
+  unsigned int device_id; 
 
-  msg_to_kernel = (struct msg_to_kernel) {
-    .pid = strtol(argv[1], NULL, 10),
-    .pci_vendor_id = strtol(argv[2], NULL, 16),  
-    .pci_device_id = strtol(argv[3], NULL, 16)
-  };
+  for (int i = 0; i < argc - 1; i++) {
+    if (sscanf(argv[1 + i], "--pid=%d", &pid) == 1) has_pid = true;
+    if (sscanf(argv[1 + i], "--vid=%x", &vendor_id) == 1) has_vid = true;
+    if (sscanf(argv[1 + i], "--devid=%x", &device_id)) has_devid = true;
+  }
 
   FILE *file = fopen("/sys/kernel/debug/labmod/labmod_io", "r+");
 	if (file == NULL) {
@@ -48,35 +28,39 @@ int main(int argc, char *argv[]) {
 	}
   clearerr(file);
 
-  fwrite(&msg_to_kernel, sizeof(struct msg_to_kernel), 1, file);
-	if (ferror(file)) {
-		fprintf(stderr, "Structs writing failed with errno code: %d\n", errno);
-		exit(1);
-	}
-
-  fread(msg_to_user, sizeof(struct msg_to_user), 1, file);
-  if (ferror(file)) {
-    if (errno == EINVAL) {
-      fprintf(stderr, "Corresponding structs not found\n");
-    } else {
-      fprintf(stderr, "Structs reading failed with errno code: %d\n", errno);
-    } 
-    exit(1);
+  if (has_pid) {
+    char *buffer[BUFFER_SIZE];
+    fprintf(file, "pid: %d", pid);
+    while (true) {
+      char *msg = fgets(buffer, BUFFER_SIZE, file);
+      if (msg == NULL) {
+        if (feof(file)) break;
+        fprintf(stderr, "Page struct reading failed with errno code: %d\n", errno);
+      } else {
+        printf(msg);
+      }
+    }
   }
 
-  if (msg_to_user == NULL) {
-    fprintf(stderr, "Corresponding structs not found\n");
-    exit(1);
+  if (has_vid && has_devid) {
+    char *buffer[BUFFER_SIZE];
+    fprintf(file, "vid: %x, devid: %x", vendor_id, device_id);
+    while (true) {
+      char *msg = fgets(buffer, BUFFER_SIZE, file);
+      if (msg == NULL) {
+        if (feof(file)) break;
+        fprintf(stderr, "Pci_dev struct reading failed with errno code: %d\n", errno);
+      } else {
+        printf(msg);
+      }
+    }
   }
 
-  printf("dev structure: {\n"); 
-  printf("  vendor ID: %u,\n", msg_to_user->pci_dev.vendor);
-  printf("  device ID: %u\n", msg_to_user->pci_dev.device);
-  printf("  interrupt pin: %u\n", msg_to_user->pci_dev.pin);
-  printf("  PCI revision: %u\n", msg_to_user->pci_dev.revision);
-  printf("  Function index: %u\n", msg_to_user->pci_dev.fn);
-  printf("}\n");
-  printf("page structure: { flags: %lu, refcount: %d }\n", msg_to_user->page.flags, msg_to_user->page.refcount);
+  
+  if (!has_vid && !has_devid && !has_pid) {
+    printf("No params provided\n");
+  }
+
 	fclose(file);
 	return 0;
 }

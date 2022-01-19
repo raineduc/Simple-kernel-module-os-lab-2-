@@ -8,11 +8,15 @@
 #include <linux/fs.h>
 #include <linux/seq_file.h>
 
+#define BUFFER_SIZE 4096
+
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Rain");
 MODULE_DESCRIPTION("A simple example Linux module.");
 MODULE_VERSION("1.0");
+
+static const char *NONE_STRUCT_MESG = "No structs recorded to file\n";
 
 struct msg_to_kernel {
   int pid;
@@ -20,9 +24,12 @@ struct msg_to_kernel {
   int pci_device_id;
 };
 
+enum struct_type { NONE, PAGE, DEV };
+
 static struct dentry *root_dir;
 static struct dentry *args_file;
 
+static enum struct_type current_struct = NONE; 
 static struct page *page_struct = NULL;
 static struct pci_dev *pci_dev_struct = NULL;
 
@@ -54,6 +61,9 @@ static struct msg_to_user *build_msg_to_user(void);
 struct page *mod_get_page(int pid);
 struct pci_dev *mod_get_pci_dev(unsigned int vendor_id, unsigned int device_id);
 static void free_msg_to_user(const struct msg_to_user *msg);
+static void print_page(struct seq_file *file, struct page *page);
+static void print_dev(struct seq_file *file, struct pci_dev *pci_dev);
+static int print_struct(struct seq_file *file, void *data);
 
 
 
@@ -62,46 +72,58 @@ static void free_msg_to_user(const struct msg_to_user *msg);
 // file operations
 static int mod_open(struct inode *inode, struct file *file) {
     pr_info("labmod: debugfs file opened\n");
-    return 0;
+    return single_open(file, print_struct, NULL);
 }
 
-static ssize_t mod_read(struct file *file, char __user *buffer, size_t length, loff_t *ptr_offset) {
-  printk(KERN_INFO "labmod: result\n");
+// static ssize_t mod_read(struct file *file, char __user *buffer, size_t length, loff_t *ptr_offset) {
+//   printk(KERN_INFO "labmod: result\n");
 
-  struct msg_to_user *msg_to_user;
-  msg_to_user = build_msg_to_user();
+//   char kernel_message[BUFFER_SIZE];
 
-  if (msg_to_user == NULL) {
-    printk(KERN_ERR "labmod: there's no recorded structs");
-    return -EINVAL;
-  }
+//   if (current_struct == PAGE) {
+//     print_page(kernel_message, page_struct);
+//   } else if (current_struct == DEV) {
+//     print_dev(kernel_message, pci_dev_struct);
+//   } else {
+//     sprintf(kernel_message, NONE_STRUCT_MESG);
+//   }
 
-  if (copy_to_user(buffer, msg_to_user, sizeof(struct msg_to_user))) {
-    printk(KERN_ERR "labmod: Can't send to user");
-    free_msg_to_user(msg_to_user);
-    return -EFAULT;
-  }
+//   if (copy_to_user(buffer, kernel_message, strlen(kernel_message) + 1)) {
+//     printk(KERN_ERR "labmod: Can't send to user");
+//     return -EFAULT;
+//   }
 
-  printk(KERN_INFO "labmod: Structs sent to user");
-
-  free_msg_to_user(msg_to_user);
-  return length;
-}
+//   printk(KERN_INFO "labmod: Structs sent to user");
+//   printk(KERN_INFO "labmod: offet %lld", *ptr_offset);
+//   printk(KERN_INFO "labmod: size %zu", length);
+//   return (ptr_offset != NULL && *ptr_offset > 0) ? 0 : length;
+// }
 
 static ssize_t mod_write(struct file *file, const char __user *buffer, size_t length, loff_t *ptr_offset) {
   printk(KERN_INFO "labmod: get arguments\n");
-  struct msg_to_kernel msg_to_kernel;
+  char user_message[BUFFER_SIZE];
+  int pid;
+  unsigned int vendor_id, device_id;
 
-  if (copy_from_user(&msg_to_kernel, buffer, sizeof(struct msg_to_kernel))) {
+  if (copy_from_user(user_message, buffer, length)) {
     printk(KERN_ERR "labmod: Can't write to kernel");
     return -EFAULT;
   }
 
-  printk(KERN_INFO "labmod: pid %d, pci vendor id %d, pci device id %d", msg_to_kernel.pid, msg_to_kernel.pci_vendor_id, msg_to_kernel.pci_device_id);
-
-  fill_structs(msg_to_kernel.pid, msg_to_kernel.pci_vendor_id, msg_to_kernel.pci_device_id);
-
-  return length;
+  if (sscanf(user_message, "pid: %d",&pid) == 1) {
+    printk(KERN_INFO "labmod: pid: %d", pid);
+    current_struct = PAGE;
+    page_struct = mod_get_page(pid);
+  } else if (sscanf(user_message, "vid: %x, devid: %x", &vendor_id, &device_id) == 2) {
+    printk(KERN_INFO "labmod: pci vendor id %x, pci device id %x", vendor_id, device_id);
+    current_struct = DEV;
+    pci_dev_struct = mod_get_pci_dev(vendor_id, device_id);
+  } else {
+    printk(KERN_ERR "labmod: Can't parse input");
+    return -EINVAL;
+  }
+  single_open(file, print_struct, NULL);
+  return strlen(user_message);
 }
 
 static int mod_release(struct inode *inode, struct file *file) {
@@ -111,7 +133,7 @@ static int mod_release(struct inode *inode, struct file *file) {
 
 static struct file_operations mod_io_ops = {
   .owner = THIS_MODULE,
-  .read = mod_read,
+  .read = seq_read,
   .write = mod_write,
   .open = mod_open,
   .release = mod_release
@@ -155,6 +177,47 @@ static void __exit mod_exit(void) {
   printk(KERN_INFO "labmod: module unloaded\n");
 }
 
+
+
+
+
+//structs output
+
+static int print_struct(struct seq_file *file, void *data) {
+  if (current_struct == PAGE) {
+    if (page_struct == NULL) {
+      seq_printf(file, "Page struct with provided id not found\n");
+      return 0;
+    }
+    print_page(file, page_struct);
+  } else if (current_struct == DEV) {
+    if (pci_dev_struct == NULL) {
+      seq_printf(file, "Pci_dev struct with provided params not found\n");
+      return 0;
+    }
+    print_dev(file, pci_dev_struct);
+  } else {
+    seq_printf(file, NONE_STRUCT_MESG);
+  }
+  return 0;
+}
+
+static void print_page(struct seq_file *file, struct page *page) {
+  seq_printf(file, "page structure: {\n");
+  seq_printf(file, "  flags: %lu,\n", page->flags);
+  seq_printf(file, "  refcount: %d\n", page->_refcount.counter);
+  seq_printf(file, "}\n");
+}
+
+static void print_dev(struct seq_file *file, struct pci_dev *pci_dev) {
+  seq_printf(file, "dev structure: {\n"); 
+  seq_printf(file, "  vendor ID: %u,\n", pci_dev->vendor);
+  seq_printf(file, "  device ID: %u\n", pci_dev->device);
+  seq_printf(file, "  interrupt pin: %u\n", pci_dev->pin);
+  seq_printf(file, "  PCI revision: %u\n", pci_dev->revision);
+  seq_printf(file, "  Function index: %u\n", PCI_FUNC(pci_dev->devfn));
+  seq_printf(file, "}\n");
+}
 
 
 
