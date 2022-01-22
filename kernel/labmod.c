@@ -7,6 +7,7 @@
 #include <linux/debugfs.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
+#include <linux/mutex.h>
 
 #define BUFFER_SIZE 4096
 
@@ -16,13 +17,9 @@ MODULE_AUTHOR("Rain");
 MODULE_DESCRIPTION("A simple example Linux module.");
 MODULE_VERSION("1.0");
 
-static const char *NONE_STRUCT_MESG = "No structs recorded to file\n";
+static DEFINE_MUTEX(seq_file_mutex);
 
-struct msg_to_kernel {
-  int pid;
-  int pci_vendor_id;
-  int pci_device_id;
-};
+static const char *NONE_STRUCT_MESG = "No structs recorded to file\n";
 
 enum struct_type { NONE, PAGE, DEV };
 
@@ -33,34 +30,12 @@ static enum struct_type current_struct = NONE;
 static struct page *page_struct = NULL;
 static struct pci_dev *pci_dev_struct = NULL;
 
-struct msg_page {
-  unsigned long flags;
-  int refcount;
-};
-
-struct msg_pci_dev {
-  unsigned short vendor;
-  unsigned short device;
-  unsigned char pin;
-  unsigned char revision;
-  unsigned int fn;
-};
-
-struct msg_to_user {
-  struct msg_page page;
-  struct msg_pci_dev pci_dev;
-};
-
-
 
 
 
 //func declarations
-static void fill_structs(int pid, unsigned int vendor_id, unsigned int device_id);
-static struct msg_to_user *build_msg_to_user(void);
 struct page *mod_get_page(int pid);
 struct pci_dev *mod_get_pci_dev(unsigned int vendor_id, unsigned int device_id);
-static void free_msg_to_user(const struct msg_to_user *msg);
 static void print_page(struct seq_file *file, struct page *page);
 static void print_dev(struct seq_file *file, struct pci_dev *pci_dev);
 static int print_struct(struct seq_file *file, void *data);
@@ -72,32 +47,9 @@ static int print_struct(struct seq_file *file, void *data);
 // file operations
 static int mod_open(struct inode *inode, struct file *file) {
     pr_info("labmod: debugfs file opened\n");
+    mutex_lock(&seq_file_mutex);
     return single_open(file, print_struct, NULL);
 }
-
-// static ssize_t mod_read(struct file *file, char __user *buffer, size_t length, loff_t *ptr_offset) {
-//   printk(KERN_INFO "labmod: result\n");
-
-//   char kernel_message[BUFFER_SIZE];
-
-//   if (current_struct == PAGE) {
-//     print_page(kernel_message, page_struct);
-//   } else if (current_struct == DEV) {
-//     print_dev(kernel_message, pci_dev_struct);
-//   } else {
-//     sprintf(kernel_message, NONE_STRUCT_MESG);
-//   }
-
-//   if (copy_to_user(buffer, kernel_message, strlen(kernel_message) + 1)) {
-//     printk(KERN_ERR "labmod: Can't send to user");
-//     return -EFAULT;
-//   }
-
-//   printk(KERN_INFO "labmod: Structs sent to user");
-//   printk(KERN_INFO "labmod: offet %lld", *ptr_offset);
-//   printk(KERN_INFO "labmod: size %zu", length);
-//   return (ptr_offset != NULL && *ptr_offset > 0) ? 0 : length;
-// }
 
 static ssize_t mod_write(struct file *file, const char __user *buffer, size_t length, loff_t *ptr_offset) {
   printk(KERN_INFO "labmod: get arguments\n");
@@ -127,6 +79,7 @@ static ssize_t mod_write(struct file *file, const char __user *buffer, size_t le
 }
 
 static int mod_release(struct inode *inode, struct file *file) {
+    mutex_unlock(&seq_file_mutex);
     pr_info("labmod: debugfs file released\n");
     return 0;
 }
@@ -138,27 +91,6 @@ static struct file_operations mod_io_ops = {
   .open = mod_open,
   .release = mod_release
 };
-
-static struct msg_to_user *build_msg_to_user(void) {
-  if (page_struct == NULL || pci_dev_struct == NULL) return NULL;
-  struct msg_to_user *msg_to_user = (struct msg_to_user*) kmalloc(sizeof(struct msg_to_user), GFP_KERNEL);
-  msg_to_user->page.flags = page_struct->flags;
-  msg_to_user->page.refcount = page_struct->_refcount.counter;
-
-  msg_to_user->pci_dev.vendor = pci_dev_struct->vendor;
-  msg_to_user->pci_dev.device = pci_dev_struct->device;
-  msg_to_user->pci_dev.pin = pci_dev_struct->pin;
-  msg_to_user->pci_dev.revision = pci_dev_struct->revision;
-  msg_to_user->pci_dev.fn = PCI_FUNC(pci_dev_struct->devfn);;
-
-  return msg_to_user;
-}
-
-static void free_msg_to_user(const struct msg_to_user *msg) {
-  if (msg != NULL) kfree(msg);
-}
-
-
 
 
 
@@ -173,6 +105,7 @@ static int __init mod_init(void) {
 }
 
 static void __exit mod_exit(void) {
+  mutex_destroy(&seq_file_mutex);
   debugfs_remove_recursive(root_dir);
   printk(KERN_INFO "labmod: module unloaded\n");
 }
@@ -223,11 +156,6 @@ static void print_dev(struct seq_file *file, struct pci_dev *pci_dev) {
 
 
 //extracting structs
-static void fill_structs(int pid, unsigned int vendor_id, unsigned int device_id) {
-  page_struct = mod_get_page(pid);
-  pci_dev_struct = mod_get_pci_dev(vendor_id, device_id);
-}
-
 static struct page *get_process_page(struct mm_struct* mm, long address) {
     pgd_t *pgd;
     p4d_t* p4d;
